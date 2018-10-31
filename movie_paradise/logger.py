@@ -8,7 +8,7 @@ import logging
 
 
 class Logger:
-    def __init__(self, path, clevel=logging.DEBUG, Flevel=logging.INFO):
+    def __init__(self, path, clevel=logging.INFO, Flevel=logging.INFO):
         #设置创建日志的对象
         self.logger = logging.getLogger(path)
         #设置日志的最低级别低于这个级别将不会在屏幕输出，也不会保存到log文件

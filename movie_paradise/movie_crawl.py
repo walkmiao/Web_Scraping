@@ -6,7 +6,7 @@
 # @Desc  :
 import time
 from lxml import etree
-from threading import Thread
+from threading import Thread, Lock
 from queue import Queue
 import requests
 from ftplib import FTP
@@ -31,8 +31,6 @@ from movie_paradise.logger import logger
 # logging.basicConfig(level=logging.INFO)
 
 
-
-
 class CrawlKind(Thread):
     def __init__(self, name, url, q):
         super(CrawlKind, self).__init__(name=name)
@@ -46,14 +44,12 @@ class CrawlKind(Thread):
 
 
 class CrawInfo(Thread):
-    def __init__(self, q):
+    def __init__(self, q,):
         super(CrawInfo, self).__init__()
-        self.conn = SqlInit('movie.db', 'movie_info')
-        self.conn.create_table()
         self.q = q
 
     def run(self):
-        crawl_movie_info(self.q, self.conn)
+        crawl_movie_info(self.q)
 
 
 class SqlInit:
@@ -82,20 +78,22 @@ class SqlInit:
             except Exception as e:
                 print('[FAIL]创建表{}错误:[{}]'.format(self.table, e))
 
-    def sql_insert(self, info, link, kind, publish=None, country=None):
-        if info and link:
+    def sql_insert(self, data):
+            # sql_expression = '''INSERT INTO {table} (INFO, LINK, KIND, PUBLISH_DATE, COUNTRY)
+            #                     VALUES ('{info}', '{link}', '{kind}', '{publish}', '{country}')
+            #                     '''.format(table=self.table, info=info,
+            #                                link=link, kind=kind, publish=publish, country=country)
             sql_expression = '''INSERT INTO {table} (INFO, LINK, KIND, PUBLISH_DATE, COUNTRY) 
-                                VALUES ('{info}', '{link}', '{kind}', '{publish}', '{country}')
-                                '''.format(table=self.table, info=info,
-                                           link=link, kind=kind, publish=publish, country=country)
+                                           VALUES (?, ?, ?, ?, ?)
+                                           '''.format(table=self.table)
             try:
-                with self.conn:
-                    self.conn.execute(sql_expression)
-                    logger.info('[SUCCESS]插入 {} 到 {}表 成功'.format(info, self.table))
+                for d in data:
+                    self.conn.execute(sql_expression, d)
+                    print('[SUCCESS]插入 {} 成功'.format(d[0]))
+                self.conn.commit()
+                self.conn.close()
             except (sqlite3.OperationalError, sqlite3.IntegrityError) as e:
-                logger.info('[FAIL]插入数据库失败:[{}] SQL:{}'.format(e, sql_expression))
-        else:
-            logger.info('[FAIL]插入数据库失败: info={}  link={} ,please check!'.format(info, link))
+                logger.info('[FAIL]插入数据库失败 SQL:{}'.format(e))
 
     def sql_query(self, name):
         try:
@@ -153,13 +151,20 @@ class FtpDownload:
         f.close()
 
 
-def get_res(url):
-    res = requests.get(url,headers=headers)
-    res_url = res.url
-    crawled_set.add(res_url)
-    res.encoding = 'gb2312'
-    html = res.text
-    return html, res_url
+def get_res(url, times=5):
+    try_count = 1
+    while times > 0:
+        res = requests.get(url, headers=headers)
+        if res.status_code == 200:
+            res_url = res.url
+            crawled_set.add(res_url)
+            res.encoding = 'gb2312'
+            html = res.text
+            return html, res_url
+        else:
+            times = times - 1
+            try_count += 1
+            logger.info('爬取 url:{} error！将进行{}次尝试'.format(url, try_count))
 
 
 def crawl_index():
@@ -216,64 +221,89 @@ def crawl_kinds(url, q, crawl_num=0):
 #         f.write(str(current)+ ':'
 
 
-def crawl_movie_info(q, conn):
+def crawl_movie_info(q):
     '''
     :param q: queue
     :param conn: sqlite连接
     :return:
     '''
+    global mutex
+    global data_list
     while True:
-        if not q.empty():
-            url = q.get()
-            if url not in crawled_set:
-                logging.info("从QUEUE取出URL:{}".format(url))
-                html, res_url = get_res(url)
-                if 'gndy' in res_url:
-                    kind = '电影'
-                elif 'tv' in res_url:
-                    kind = '电视剧'
-                elif 'dongman' in res_url:
-                    kind = '动漫'
-                elif 'zongyi' in  res_url:
-                    kind = '综艺'
-                else:
-                    kind = '其他'
-
-                if 'gn' or 'hy' in res_url:
-                    if 'oumei' not in res_url:
-                        country = '国内'
-                    else:
-                        country = '欧美'
-                elif 'oumeitv' in res_url:
-                    country = '欧美'
-                elif 'rihan' in res_url:
-                    country = '日韩'
-                else:
-                    country = '其他国家'
-                link_list = list()
-                sel = etree.HTML(html)
-                for i in sel.xpath("//div[@id='Zoom']//table"):
-                    link = i.xpath(".//a/@href")[0] if i.xpath(".//a/@href") else "暂缺"  # 电影只有一个连接，电视则有多条连接
-                    link_list.append(link)
-                link_string = ' '.join(link_list)
-                movie_info = sel.xpath("//div[@class='title_all']/h1/font/text()")[0] \
-                    if sel.xpath("//div[@class='title_all']/h1/font/text()") else "资源信息未解析出"
-                publish_date = re.findall(r'.*发布时间.*(\d{4}\-\d{2}\-\d{2}).*', html)[0]
-                conn.sql_insert(movie_info, link_string, kind, publish_date, country)
+        url = q.get()
+        q.task_done()
+        if not url:
+            print('已经结束了')
+            break
+        if url not in crawled_set:
+            logging.info("从QUEUE取出URL:{}".format(url))
+            html, res_url = get_res(url)
+            if 'gndy' in res_url:
+                kind = '电影'
+            elif 'tv' in res_url:
+                kind = '电视剧'
+            elif 'dongman' in res_url:
+                kind = '动漫'
+            elif 'zongyi' in  res_url:
+                kind = '综艺'
             else:
-                continue
+                kind = '其他'
+
+            if 'gn' or 'hy' in res_url:
+                if 'oumei' not in res_url:
+                    country = '国内'
+                else:
+                    country = '欧美'
+            elif 'oumeitv' in res_url:
+                country = '欧美'
+            elif 'rihan' in res_url:
+                country = '日韩'
+            else:
+                country = '其他国家'
+            link_list = list()
+            sel = etree.HTML(html)
+            for i in sel.xpath("//div[@id='Zoom']//table"):
+                link = i.xpath(".//a/@href")[0] if i.xpath(".//a/@href") else "暂缺"  # 电影只有一个连接，电视则有多条连接
+                link_list.append(link)
+            link_string = ' '.join(link_list)
+            movie_info = sel.xpath("//div[@class='title_all']/h1/font/text()")[0] \
+                if sel.xpath("//div[@class='title_all']/h1/font/text()") else "资源信息未解析出"
+            publish_date = re.findall(r'.*发布时间.*(\d{4}\-\d{2}\-\d{2}).*', html)[0]
+            mutex.acquire()
+            data_list.append((movie_info, link_string, kind, publish_date, country))
+            logger.info('[SUCCESS]插入{}到列表成功'.format(movie_info))
+            mutex.release()
+
+
 
 def main():
-    q = Queue()
+    global mutex
+    mutex = Lock()
+    global data_list
+    data_list = []
+    sql_ins = SqlInit('movie.db', 'movie_info')
+    sql_ins.create_table()
     m_dict = crawl_index()
     work_list = []
+    queue_list = []
     for kind, url in m_dict.items():
+        q = Queue()
+        queue_list.append(q)
         work = CrawlKind(name=kind, url=url, q=q)
+        work_info = CrawInfo(q)
         work_list.append(work)
-    info_worker = CrawInfo(q)
-    work_list.append(info_worker)
+        work_list.append(work_info)
     for work in work_list:
+        work.setDaemon(True)
         work.start()
+    for work in work_list:
+        work.join()
+    for q in queue_list:
+        q.put(None)
+    for q in queue_list:
+        q.join()
+    sql_ins.sql_insert(data_list)
+    print("[END] ALL DATA({} items) INSERT SUCCESS!".format(len(data_list)))
 
 
 
