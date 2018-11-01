@@ -27,7 +27,7 @@ class CrawlKind(Thread):
 
     def run(self):
         logger.info("THREAD{}启动了" .format(self.getName()))
-        crawl_kinds(self.url, self.q)
+        crawl_kinds(self.name, self.url, self.q)
 
 
 class CrawInfo(Thread):
@@ -41,15 +41,16 @@ class CrawInfo(Thread):
 
 
 class SqlInit:
-    def __init__(self, db, table):
+    def __init__(self, db, table, insert_count):
         self.db = db
         self.table = table
+        self.insert_count = insert_count
         try:
             conn = sqlite3.connect(self.db, check_same_thread=False)
-            print("[SUCCESS]数据库{}创建完毕".format(db))
+            logger.info("[SUCCESS]数据库{}创建完毕".format(db))
             self.conn = conn
         except Exception as e:
-            print('[FAIL]数据库创建错误:[{}]'.format(e))
+            logger.info('[FAIL]数据库创建错误:[{}]'.format(e))
 
     def create_table(self):
         with self.conn:
@@ -61,24 +62,26 @@ class SqlInit:
                                     MAGNET_LINK           TEXT    NOT NULL,
                                     KIND           TEXT    NOT NULL,
                                     PUBLISH_DATE   TEXT            ,
-                                    COUNTRY         TEXT
+                                    COUNTRY         TEXT           ,
+                                    SCORE           FLOAT 
                                    );'''.format(table=self.table))
-                print("[SUCCESS]Table {} created successfully".format(self.table))
+                logger.info("[SUCCESS]Table {} created successfully".format(self.table))
             except Exception as e:
-                print('[FAIL]创建表{}错误:[{}]'.format(self.table, e))
+                logger.info('[FAIL]创建表{}错误:[{}]'.format(self.table, e))
 
     def sql_insert(self, data):
             # sql_expression = '''INSERT INTO {table} (INFO, LINK, KIND, PUBLISH_DATE, COUNTRY)
             #                     VALUES ('{info}', '{link}', '{kind}', '{publish}', '{country}')
             #                     '''.format(table=self.table, info=info,
             #                                link=link, kind=kind, publish=publish, country=country)
-            sql_expression = '''INSERT INTO {table} (INFO, FTP_LINK, MAGNET_LINK,  KIND, PUBLISH_DATE, COUNTRY) 
-                                           VALUES (?, ?, ?, ?, ?, ?)
+            sql_expression = '''INSERT INTO {table} (INFO, FTP_LINK, MAGNET_LINK,  KIND, PUBLISH_DATE, COUNTRY, SCORE) 
+                                           VALUES (?, ?, ?, ?, ?, ?, ?)
                                            '''.format(table=self.table)
             try:
 
                 self.conn.executemany(sql_expression, data)
-                print('[SUCCESS]插入 {} 成功'.format(data[0]))
+                self.insert_count += 50
+                print('[SUCCESS]插入50行成功，当前行[{}]'.format(self.insert_count))
                 self.conn.commit()
             except (sqlite3.OperationalError, sqlite3.IntegrityError) as e:
                 logger.info('[FAIL]插入数据库失败 SQL:{}'.format(e))
@@ -142,17 +145,21 @@ class FtpDownload:
 def get_res(url, times=5):
     try_count = 1
     while times > 0:
-        res = requests.get(url, headers=headers)
-        if res.status_code == 200:
-            res_url = res.url
-            crawled_set.add(res_url)
-            res.encoding = 'gb2312'
-            html = res.text
-            return html, res_url
-        else:
-            times = times - 1
-            try_count += 1
-            logger.info('爬取 url:{} error！将进行{}次尝试'.format(url, try_count))
+        try:
+            res = requests.get(url, headers=headers)
+            if res.status_code == 200:
+                res_url = res.url
+                crawled_set.add(res_url)
+                res.encoding = 'gb2312'
+                html = res.text
+                return html, res_url
+            else:
+                times = times - 1
+                try_count += 1
+                logger.info('爬取 url:{} error！将进行{}次尝试'.format(url, try_count))
+        except Exception as e:
+            logger.error('[REQUEST ERROR]:[{}]'.format(e))
+    return
 
 
 def crawl_index():
@@ -171,7 +178,7 @@ def crawl_index():
     return m_dict
 
 
-def crawl_kinds(url, q, crawl_num=0):
+def crawl_kinds(name, url, q, crawl_num=0):
     '''
     分类解析，遇到下一页解析并继续爬取
     :param url: 分类url
@@ -182,7 +189,6 @@ def crawl_kinds(url, q, crawl_num=0):
     cache_url = res_url
     crawl_num += 1
     sel = etree.HTML(html)
-    logging.info("res_url:{}".format(res_url))
     movie_items = sel.xpath("//table[@class='tbspan']")
     for i in movie_items:
         a_mark = i.xpath(".//a[contains(@href,'.html')]")[0]
@@ -191,15 +197,15 @@ def crawl_kinds(url, q, crawl_num=0):
         if link:
             link = prefix + link
             q.put(link)
-            logger.info("向Queue中放入[{}]:{}".format(movie_info, link))
+            logger.debug("向Queue中放入[{}]:{}".format(movie_info, link))
     next_link = sel.xpath("//a[contains(text(),'下一页')]/@href")
     if next_link:
         next_link = prefix + sel.xpath("//a[contains(text(),'下一页')]/@href")[0]
         # logger.debug("获取到next_link:%s" % next_link)
         # logger.info("开始爬取地址:{}".format(next_link))
-        crawl_kinds(next_link, q, crawl_num)
+        crawl_kinds(name, next_link, q, crawl_num)
     else:
-        logger.info("{}分类已经爬取完毕，共{}条  最后URL:{}".format(next_link, crawl_num, cache_url))
+        logger.info("{}分类已经爬取完毕，共{}条  最后URL:{}".format(name, crawl_num, cache_url))
 
 
 # def write_err(err, path="./error.txt"):
@@ -223,12 +229,16 @@ def crawl_movie_info(q, sql_ins):
             print('已经结束了')
             break
         if url not in crawled_set:
-            logging.info("从QUEUE取出URL:{}".format(url))
-            html, res_url = get_res(url)
+            logging.debug("从QUEUE取出URL:{}".format(url))
+            result = get_res(url)
+            if result:
+                html, res_url = get_res(url)
+            else:
+                continue
             ftp_link = list()
             magnet_link = list()
-            sel = etree.HTML(html)
             try:
+                sel = etree.HTML(html)
                 for i in sel.xpath("//div[@id='Zoom']//table"):
                     link = i.xpath(".//a/@href")[0] if i.xpath(".//a/@href") else "暂缺"  # 电影只有一个连接，电视则有多条连接
                     if 'ftp' in link:
@@ -243,6 +253,7 @@ def crawl_movie_info(q, sql_ins):
                 if sel.xpath("//div[@class='title_all']//h1/text()") else "资源信息未解析出"
             publish_date = re.findall(r'.*发布时间.*(\d{4}\-\d{2}\-\d{2}).*', html)[0]  \
                            if re.findall(r'.*发布时间.*(\d{4}\-\d{2}\-\d{2}).*', html) else '未知时间'
+            score = re.findall(r'.*(\d\.\d).*', movie_info)[0] if re.findall(r'.*(\d\.\d).*', movie_info) else None
             kind = '其他'
             country = '其他'
             for k in movie_kind_list:
@@ -252,9 +263,12 @@ def crawl_movie_info(q, sql_ins):
             for c in country_list:
                 if c in movie_info:
                     country = c
+                    break
+                if '欧美' in movie_info:
+                    country = '欧美'
             mutex.acquire()
-            data_list.append((movie_info, ftp_link, magnet_link, kind, publish_date, country))
-            if len(data_list) > 20:
+            data_list.append((movie_info, ftp_link, magnet_link, kind, publish_date, country,score))
+            if len(data_list) == 50:
                 sql_ins.sql_insert(data_list)
                 data_list = []
             mutex.release()
@@ -265,7 +279,9 @@ def main():
     mutex = Lock()
     global data_list
     data_list = []
-    sql_ins = SqlInit('movie.db', 'movie_info')
+    global insert_count
+    insert_count = 0
+    sql_ins = SqlInit('movie.db', 'movie_info', insert_count)
     sql_ins.create_table()
     m_dict = crawl_index()
     work_list = []
