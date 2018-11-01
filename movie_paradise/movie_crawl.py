@@ -4,7 +4,6 @@
 # @Author: lch
 # @Date  : 2018/10/15
 # @Desc  :
-import time
 from lxml import etree
 from threading import Thread, Lock
 from queue import Queue
@@ -16,6 +15,7 @@ import sqlite3
 import logging
 from movie_paradise.config import start_url, headers, prefix, crawled_set, movie_kind_list, country_list
 from movie_paradise.logger import logger
+import datetime
 
 
 class CrawlKind(Thread):
@@ -57,6 +57,7 @@ class SqlInit:
             try:
                 self.conn.execute('''CREATE TABLE {table}
                                    (ID INTEGER PRIMARY KEY     AUTOINCREMENT ,
+                                    INSERT_TIME,   TIMESTAMP  NOT NULL,
                                     INFO           TEXT    NOT NULL,
                                     FTP_LINK           TEXT    NOT NULL,
                                     MAGNET_LINK           TEXT    NOT NULL,
@@ -74,14 +75,14 @@ class SqlInit:
             #                     VALUES ('{info}', '{link}', '{kind}', '{publish}', '{country}')
             #                     '''.format(table=self.table, info=info,
             #                                link=link, kind=kind, publish=publish, country=country)
-            sql_expression = '''INSERT INTO {table} (INFO, FTP_LINK, MAGNET_LINK,  KIND, PUBLISH_DATE, COUNTRY, SCORE) 
-                                           VALUES (?, ?, ?, ?, ?, ?, ?)
+            sql_expression = '''INSERT INTO {table} (INSERT_TIME, INFO, FTP_LINK, MAGNET_LINK,  KIND, PUBLISH_DATE, COUNTRY, SCORE) 
+                                           VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?, ?)
                                            '''.format(table=self.table)
             try:
 
                 self.conn.executemany(sql_expression, data)
                 self.insert_count += 50
-                print('[SUCCESS]插入50行成功，当前行[{}]'.format(self.insert_count))
+                print('[{}]插入50行成功，当前行[{}]'.format(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), self.insert_count))
                 self.conn.commit()
             except (sqlite3.OperationalError, sqlite3.IntegrityError) as e:
                 logger.info('[FAIL]插入数据库失败 SQL:{}'.format(e))
@@ -220,8 +221,7 @@ def crawl_movie_info(q, sql_ins):
     :param conn: sqlite连接
     :return:
     '''
-    global mutex
-    global data_list
+    data_list = []
     while True:
         url = q.get()
         q.task_done()
@@ -231,6 +231,7 @@ def crawl_movie_info(q, sql_ins):
         if url not in crawled_set:
             logging.debug("从QUEUE取出URL:{}".format(url))
             result = get_res(url)
+            crawled_set.add(url)
             if result:
                 html, res_url = get_res(url)
             else:
@@ -245,40 +246,39 @@ def crawl_movie_info(q, sql_ins):
                         ftp_link.append(link)
                     else:
                         magnet_link.append(link)
+                ftp_link = '||'.join(ftp_link)
+                magnet_link = '||'.join(magnet_link)
+                movie_info = sel.xpath("//div[@class='title_all']//h1/text()")[0] \
+                    if sel.xpath("//div[@class='title_all']//h1/text()") else "资源信息未解析出"
+                publish_date = re.findall(r'.*发布时间.*(\d{4}\-\d{2}\-\d{2}).*', html)[0] \
+                    if re.findall(r'.*发布时间.*(\d{4}\-\d{2}\-\d{2}).*', html) else '未知时间'
+                score = re.findall(r'.*(\d\.\d).*', movie_info)[0] if re.findall(r'.*(\d\.\d).*', movie_info) else None
+                kind = '其他'
+                country = '其他'
+                for k in movie_kind_list:
+                    if k in movie_info:
+                        kind = k
+                        break
+                for c in country_list:
+                    if c in movie_info:
+                        country = c
+                        break
+                    if '欧美' in movie_info:
+                        country = '欧美'
+                data_list.append((movie_info, ftp_link, magnet_link, kind, publish_date, country, score))
+                if len(data_list) == 50:
+                    mutex.acquire()
+                    sql_ins.sql_insert(data_list)
+                    data_list = []
+                    mutex.release()
             except Exception as e:
                 logger.info("获取不到此URL:{}下载地址[{}]".format(url, e))
-            ftp_link = '||'.join(ftp_link)
-            magnet_link = '||'.join(magnet_link)
-            movie_info = sel.xpath("//div[@class='title_all']//h1/text()")[0] \
-                if sel.xpath("//div[@class='title_all']//h1/text()") else "资源信息未解析出"
-            publish_date = re.findall(r'.*发布时间.*(\d{4}\-\d{2}\-\d{2}).*', html)[0]  \
-                           if re.findall(r'.*发布时间.*(\d{4}\-\d{2}\-\d{2}).*', html) else '未知时间'
-            score = re.findall(r'.*(\d\.\d).*', movie_info)[0] if re.findall(r'.*(\d\.\d).*', movie_info) else None
-            kind = '其他'
-            country = '其他'
-            for k in movie_kind_list:
-                if k in movie_info:
-                    kind = k
-                    break
-            for c in country_list:
-                if c in movie_info:
-                    country = c
-                    break
-                if '欧美' in movie_info:
-                    country = '欧美'
-            mutex.acquire()
-            data_list.append((movie_info, ftp_link, magnet_link, kind, publish_date, country,score))
-            if len(data_list) == 50:
-                sql_ins.sql_insert(data_list)
-                data_list = []
-            mutex.release()
+                continue
 
 
 def main():
     global mutex
     mutex = Lock()
-    global data_list
-    data_list = []
     global insert_count
     insert_count = 0
     sql_ins = SqlInit('movie.db', 'movie_info', insert_count)
@@ -303,8 +303,7 @@ def main():
     for q in queue_list:
         q.join()
     sql_ins.conn.close()
-    print("[END] ALL DATA({} items) INSERT SUCCESS!".format(len(data_list)))
-
+    print("[END] ALL DATA({} items) INSERT SUCCESS!")
 
 
 if __name__ == "__main__":
