@@ -79,7 +79,8 @@ class SqlInit:
                                            VALUES (?, ?, ?, ?, ?, ?, ?)
                                            '''.format(table=self.table)
             try:
-
+                self.conn.execute("PRAGMA synchronous = OFF")  # 关闭磁盘同步
+                self.conn.execute("BEGIN TRANSACTION")  # 开始事务处理
                 self.conn.executemany(sql_expression, data)
                 self.insert_count += 50
                 print('[{}]插入50行成功，当前行[{}]'.format(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), self.insert_count))
@@ -179,7 +180,7 @@ def crawl_index():
     return m_dict
 
 
-def crawl_kinds(name, url, q, crawl_num=0):
+def crawl_kinds(name, url, q, crawl_num=0, link_num=0):
     '''
     分类解析，遇到下一页解析并继续爬取
     :param url: 分类url
@@ -196,15 +197,17 @@ def crawl_kinds(name, url, q, crawl_num=0):
         movie_info = a_mark.xpath("./text()")[0] if a_mark.xpath("./text()") else a_mark.xpath("./@title")[0]
         link = a_mark.xpath("./@href")[0]
         if link:
+            link_num += 1
             link = prefix + link
+            # logger.info("获取到分类[{}]连接 link序号:{} link:{}".format(name, link_num, link))
             q.put(link)
-            logger.debug("向Queue中放入[{}]:{}".format(movie_info, link))
+            # logger.debug("向Queue中放入[{}]:{}".format(movie_info, link))
     next_link = sel.xpath("//a[contains(text(),'下一页')]/@href")
     if next_link:
         next_link = prefix + sel.xpath("//a[contains(text(),'下一页')]/@href")[0]
-        # logger.debug("获取到next_link:%s" % next_link)
+        # logger.info("获取到分类[{}]next_link:{}".format(name, next_link))
         # logger.info("开始爬取地址:{}".format(next_link))
-        crawl_kinds(name, next_link, q, crawl_num)
+        crawl_kinds(name, next_link, q, crawl_num, link_num)
     else:
         logger.info("{}分类已经爬取完毕，共{}条  最后URL:{}".format(name, crawl_num, cache_url))
 
@@ -266,11 +269,11 @@ def crawl_movie_info(q, sql_ins):
                     if '欧美' in movie_info:
                         country = '欧美'
                 data_list.append((movie_info, ftp_link, magnet_link, kind, publish_date, country, score))
-                if len(data_list) == 50:
-                    mutex.acquire()
-                    sql_ins.sql_insert(data_list)
-                    data_list = []
-                    mutex.release()
+                if len(data_list) > 50:
+                    # mutex.acquire()
+                    sql_ins.sql_insert(data_list[:50])
+                    data_list = data_list[50:]
+                    # mutex.release()
             except Exception as e:
                 logger.info("获取不到此URL:{}下载地址[{}]".format(url, e))
                 continue
@@ -300,8 +303,8 @@ def main():
         work.join()
     for q in queue_list:
         q.put(None)
-    for q in queue_list:
-        q.join()
+    # for q in queue_list:
+    #     q.join()
     sql_ins.conn.close()
     print("[END] ALL DATA({} items) INSERT SUCCESS!")
 

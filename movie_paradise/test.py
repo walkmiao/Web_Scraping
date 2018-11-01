@@ -38,4 +38,3 @@ def crawl_movie_info(url):
 
 result = crawl_movie_info(url)
 print(result)
-
