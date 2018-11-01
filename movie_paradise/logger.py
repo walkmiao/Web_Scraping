@@ -12,7 +12,7 @@ class Logger:
         #设置创建日志的对象
         self.logger = logging.getLogger(path)
         #设置日志的最低级别低于这个级别将不会在屏幕输出，也不会保存到log文件
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.INFO)
         #给这个handler选择一个格式（）
         fmt = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s', '%Y-%m-%d %H:%M:%S')
         # 设置终端日志 像终端输出的日志
