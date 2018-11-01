@@ -57,7 +57,7 @@ class SqlInit:
             try:
                 self.conn.execute('''CREATE TABLE {table}
                                    (ID INTEGER PRIMARY KEY     AUTOINCREMENT ,
-                                    INSERT_TIME,   TIMESTAMP  NOT NULL,
+                                    INSERT_TIME   TIMESTAMP   DEFAULT (datetime('now', 'localtime')), 
                                     INFO           TEXT    NOT NULL,
                                     FTP_LINK           TEXT    NOT NULL,
                                     MAGNET_LINK           TEXT    NOT NULL,
@@ -75,8 +75,8 @@ class SqlInit:
             #                     VALUES ('{info}', '{link}', '{kind}', '{publish}', '{country}')
             #                     '''.format(table=self.table, info=info,
             #                                link=link, kind=kind, publish=publish, country=country)
-            sql_expression = '''INSERT INTO {table} (INSERT_TIME, INFO, FTP_LINK, MAGNET_LINK,  KIND, PUBLISH_DATE, COUNTRY, SCORE) 
-                                           VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?, ?)
+            sql_expression = '''INSERT INTO {table} (INFO, FTP_LINK, MAGNET_LINK,  KIND, PUBLISH_DATE, COUNTRY, SCORE) 
+                                           VALUES (?, ?, ?, ?, ?, ?, ?)
                                            '''.format(table=self.table)
             try:
 
