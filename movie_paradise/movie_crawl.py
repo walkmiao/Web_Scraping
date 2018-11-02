@@ -31,13 +31,14 @@ class CrawlKind(Thread):
 
 
 class CrawInfo(Thread):
-    def __init__(self, q, sql_ins):
+    def __init__(self, kind, q, sql_ins):
         super(CrawInfo, self).__init__()
+        self.kind = kind
         self.q = q
         self.sql_ins = sql_ins
 
     def run(self):
-        crawl_movie_info(self.q, self.sql_ins)
+        crawl_movie_info(self.kind, self.q, self.sql_ins)
 
 
 class SqlInit:
@@ -47,6 +48,8 @@ class SqlInit:
         self.insert_count = insert_count
         try:
             conn = sqlite3.connect(self.db, check_same_thread=False)
+            conn.execute("PRAGMA synchronous = OFF")  # 关闭磁盘同步
+            conn.execute("BEGIN TRANSACTION")  # 开始事务处理
             logger.info("[SUCCESS]数据库{}创建完毕".format(db))
             self.conn = conn
         except Exception as e:
@@ -70,7 +73,7 @@ class SqlInit:
             except Exception as e:
                 logger.info('[FAIL]创建表{}错误:[{}]'.format(self.table, e))
 
-    def sql_insert(self, data):
+    def sql_insert(self, data, count, name):
             # sql_expression = '''INSERT INTO {table} (INFO, LINK, KIND, PUBLISH_DATE, COUNTRY)
             #                     VALUES ('{info}', '{link}', '{kind}', '{publish}', '{country}')
             #                     '''.format(table=self.table, info=info,
@@ -79,11 +82,10 @@ class SqlInit:
                                            VALUES (?, ?, ?, ?, ?, ?, ?)
                                            '''.format(table=self.table)
             try:
-                self.conn.execute("PRAGMA synchronous = OFF")  # 关闭磁盘同步
-                self.conn.execute("BEGIN TRANSACTION")  # 开始事务处理
                 self.conn.executemany(sql_expression, data)
-                self.insert_count += 50
-                print('[{}]插入50行成功，当前行[{}]'.format(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), self.insert_count))
+                self.insert_count += count
+                print('[{}]插入{}行[分类:{}]成功，当前行[{}]'.format(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                      count, name, self.insert_count))
                 self.conn.commit()
             except (sqlite3.OperationalError, sqlite3.IntegrityError) as e:
                 logger.info('[FAIL]插入数据库失败 SQL:{}'.format(e))
@@ -177,7 +179,12 @@ def crawl_index():
         class_link = prefix + i.xpath(".//a/@href")[0] if i.xpath(".//a/@href") else None
         if class_link and class_name:
             m_dict[class_name] = class_link
-    return m_dict
+    temp_dict = {}
+    for k, v in m_dict.items():
+        html = get_res(v)[0]
+        count = re.findall(r'.*总数(\d+).*', html)[0]
+        temp_dict[k] = int(count)
+    return m_dict, temp_dict
 
 
 def crawl_kinds(name, url, q, crawl_num=0, link_num=0):
@@ -218,13 +225,16 @@ def crawl_kinds(name, url, q, crawl_num=0, link_num=0):
 #         f.write(str(current)+ ':'
 
 
-def crawl_movie_info(q, sql_ins):
+def crawl_movie_info(name, q, sql_ins):
     '''
     :param q: queue
     :param conn: sqlite连接
     :return:
     '''
     data_list = []
+    insert_count = 0
+    err_count = 0
+    global temp_dict
     while True:
         url = q.get()
         q.task_done()
@@ -271,11 +281,20 @@ def crawl_movie_info(q, sql_ins):
                 data_list.append((movie_info, ftp_link, magnet_link, kind, publish_date, country, score))
                 if len(data_list) > 50:
                     # mutex.acquire()
-                    sql_ins.sql_insert(data_list[:50])
+                    sql_ins.sql_insert(data_list[:50], 50, name)
                     data_list = data_list[50:]
+                    insert_count += 1
                     # mutex.release()
+                else:
+                    if (temp_dict[name]-insert_count*50) <= 50:
+                        if len(data_list) == (temp_dict[name] - err_count -insert_count*50):
+                            sql_ins.sql_insert(data_list, len(data_list), name)
+                            logger.info('当前分类[{}] 总数：{} 插入50条次数{} 出错条数:{} 最后一次插入条数{}'
+                                        .format(name, temp_dict[name], insert_count, err_count,  len(data_list)))
+                            break
             except Exception as e:
                 logger.info("获取不到此URL:{}下载地址[{}]".format(url, e))
+                err_count += 1
                 continue
 
 
@@ -284,16 +303,17 @@ def main():
     mutex = Lock()
     global insert_count
     insert_count = 0
+    global temp_dict
     sql_ins = SqlInit('movie.db', 'movie_info', insert_count)
     sql_ins.create_table()
-    m_dict = crawl_index()
+    m_dict, temp_dict = crawl_index()
     work_list = []
     queue_list = []
     for kind, url in m_dict.items():
         q = Queue()
         queue_list.append(q)
         work = CrawlKind(name=kind, url=url, q=q)
-        work_info = CrawInfo(q, sql_ins)
+        work_info = CrawInfo(kind, q, sql_ins)
         work_list.append(work)
         work_list.append(work_info)
     for work in work_list:
