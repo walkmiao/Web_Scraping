@@ -13,7 +13,7 @@ import os
 import re
 import sqlite3
 import logging
-from movie_paradise.config import start_url, headers, prefix, crawled_set, movie_kind_list, country_list
+from movie_paradise.config import start_url, headers, prefix, crawled_set,  country_list, mutex, all_count
 from movie_paradise.logger import logger
 import datetime
 
@@ -42,10 +42,10 @@ class CrawInfo(Thread):
 
 
 class SqlInit:
-    def __init__(self, db, table, insert_count):
+    def __init__(self, db, table, all_count):
         self.db = db
         self.table = table
-        self.insert_count = insert_count
+        self.all_count = all_count
         try:
             conn = sqlite3.connect(self.db, check_same_thread=False)
             conn.execute("PRAGMA synchronous = OFF")  # 关闭磁盘同步
@@ -83,9 +83,9 @@ class SqlInit:
                                            '''.format(table=self.table)
             try:
                 self.conn.executemany(sql_expression, data)
-                self.insert_count += count
-                print('[{}]插入{}行[分类:{}]成功，当前行[{}]'.format(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                      count, name, self.insert_count))
+                self.all_count += count
+                print('[{}]插入{}行[分类:{}]成功，当前分类行[{}]'.format(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                      count, name, self.all_count))
                 self.conn.commit()
             except (sqlite3.OperationalError, sqlite3.IntegrityError) as e:
                 logger.info('[FAIL]插入数据库失败 SQL:{}'.format(e))
@@ -147,7 +147,7 @@ class FtpDownload:
 
 
 def get_res(url, times=5):
-    try_count = 1
+    try_count = 0
     while times > 0:
         try:
             res = requests.get(url, headers=headers)
@@ -166,12 +166,12 @@ def get_res(url, times=5):
     return
 
 
-def crawl_index():
+def crawl_index(url):
     '''
     爬取首页，获取首页分类url
     :return:
     '''
-    html, res_url = get_res(start_url)
+    html, res_url = get_res(url)
     sel = etree.HTML(html)
     m_dict = dict()
     for seq, i in enumerate(sel.xpath("//div[@class='contain']/ul//li")[:-4]):
@@ -232,81 +232,73 @@ def crawl_movie_info(name, q, sql_ins):
     :return:
     '''
     data_list = []
-    insert_count = 0
     err_count = 0
-    global temp_dict
+    crawled_count = 0
+    insert_count = 0
     while True:
         url = q.get()
-        q.task_done()
         if not url:
-            print('已经结束了')
+            logger.info('已经结束了')
             break
-        if url not in crawled_set:
-            logging.debug("从QUEUE取出URL:{}".format(url))
-            result = get_res(url)
-            crawled_set.add(url)
-            if result:
-                html, res_url = get_res(url)
-            else:
-                continue
-            ftp_link = list()
-            magnet_link = list()
-            try:
-                sel = etree.HTML(html)
-                for i in sel.xpath("//div[@id='Zoom']//table"):
-                    link = i.xpath(".//a/@href")[0] if i.xpath(".//a/@href") else "暂缺"  # 电影只有一个连接，电视则有多条连接
-                    if 'ftp' in link:
-                        ftp_link.append(link)
+        else:
+            if url not in crawled_set:
+                crawled_set.add(url)
+                try:
+                    result = get_res(url)
+                    html, res_url = result
+                except Exception as e:
+                    logger.info("[REQUEST ERROR] [{}]".format(e))
+                    err_count += 1
+                    continue
+                ftp_link = list()
+                magnet_link = list()
+                try:
+                    sel = etree.HTML(html)
+                    for i in sel.xpath("//div[@id='Zoom']//table"):
+                        link = i.xpath(".//a/@href")[0] if i.xpath(".//a/@href") else "暂缺"  # 电影只有一个连接，电视则有多条连接
+                        if 'ftp' in link:
+                            ftp_link.append(link)
+                        else:
+                            magnet_link.append(link)
+                    ftp_link = '||'.join(ftp_link)
+                    magnet_link = '||'.join(magnet_link)
+                    movie_info = sel.xpath("//div[@class='title_all']//h1/text()")[0] \
+                        if sel.xpath("//div[@class='title_all']//h1/text()") else "资源信息未解析出"
+                    publish_date = re.findall(r'.*发布时间.*(\d{4}\-\d{2}\-\d{2}).*', html)[0] \
+                        if re.findall(r'.*发布时间.*(\d{4}\-\d{2}\-\d{2}).*', html) else '未知时间'
+                    score = re.findall(r'.*(\d\.\d).*', movie_info)[0] if re.findall(r'.*(\d\.\d).*', movie_info) else None
+                    country = '其他'
+                    for c in country_list:
+                        if c in movie_info:
+                            country = c
+                    data_list.append((movie_info, ftp_link, magnet_link, name, publish_date, country, score))
+                    if len(data_list) > 50:
+                        mutex.acquire()
+                        sql_ins.sql_insert(data_list[:50], 50, name)
+                        mutex.release()
+                        data_list = data_list[50:]
+                        insert_count += 1
                     else:
-                        magnet_link.append(link)
-                ftp_link = '||'.join(ftp_link)
-                magnet_link = '||'.join(magnet_link)
-                movie_info = sel.xpath("//div[@class='title_all']//h1/text()")[0] \
-                    if sel.xpath("//div[@class='title_all']//h1/text()") else "资源信息未解析出"
-                publish_date = re.findall(r'.*发布时间.*(\d{4}\-\d{2}\-\d{2}).*', html)[0] \
-                    if re.findall(r'.*发布时间.*(\d{4}\-\d{2}\-\d{2}).*', html) else '未知时间'
-                score = re.findall(r'.*(\d\.\d).*', movie_info)[0] if re.findall(r'.*(\d\.\d).*', movie_info) else None
-                kind = '其他'
-                country = '其他'
-                for k in movie_kind_list:
-                    if k in movie_info:
-                        kind = k
-                        break
-                for c in country_list:
-                    if c in movie_info:
-                        country = c
-                        break
-                    if '欧美' in movie_info:
-                        country = '欧美'
-                data_list.append((movie_info, ftp_link, magnet_link, kind, publish_date, country, score))
-                if len(data_list) > 50:
-                    # mutex.acquire()
-                    sql_ins.sql_insert(data_list[:50], 50, name)
-                    data_list = data_list[50:]
-                    insert_count += 1
-                    # mutex.release()
-                else:
-                    if (temp_dict[name]-insert_count*50) <= 50:
-                        if len(data_list) == (temp_dict[name] - err_count -insert_count*50):
-                            sql_ins.sql_insert(data_list, len(data_list), name)
-                            logger.info('当前分类[{}] 总数：{} 插入50条次数{} 出错条数:{} 最后一次插入条数{}'
-                                        .format(name, temp_dict[name], insert_count, err_count,  len(data_list)))
-                            break
-            except Exception as e:
-                logger.info("获取不到此URL:{}下载地址[{}]".format(url, e))
-                err_count += 1
+                        if (kind_num_dict[name]-insert_count*50) <= 50:
+                            if len(data_list) == (kind_num_dict[name] - err_count-crawled_count-insert_count*50):
+                                sql_ins.sql_insert(data_list, len(data_list), name)
+                                logger.info('当前分类[{}] 总数：{} 插入50条次数{} 出错条数:{} 重复URL条数：{} 最后一次插入条数{}'
+                                            .format(name, kind_num_dict[name], insert_count, err_count, crawled_count, len(data_list)))
+                                break
+                except Exception as e:
+                    logger.info("获取不到此URL:{}下载地址, 错误信息：[{}]".format(url, e))
+                    err_count += 1
+                    continue
+            else:
+                crawled_count += 1
                 continue
 
 
 def main():
-    global mutex
-    mutex = Lock()
-    global insert_count
-    insert_count = 0
-    global temp_dict
-    sql_ins = SqlInit('movie.db', 'movie_info', insert_count)
+    global kind_num_dict
+    m_dict, kind_num_dict = crawl_index(start_url)
+    sql_ins = SqlInit('movie.db', 'movie_info', all_count)
     sql_ins.create_table()
-    m_dict, temp_dict = crawl_index()
     work_list = []
     queue_list = []
     for kind, url in m_dict.items():
@@ -317,16 +309,14 @@ def main():
         work_list.append(work)
         work_list.append(work_info)
     for work in work_list:
-        work.setDaemon(True)
         work.start()
-    for work in work_list:
-        work.join()
+    for work_info in work_list:
+        work_info.join()
     for q in queue_list:
         q.put(None)
-    # for q in queue_list:
-    #     q.join()
+
     sql_ins.conn.close()
-    print("[END] ALL DATA({} items) INSERT SUCCESS!")
+    logger.info("[END] ALL DATA items INSERT SUCCESS!")
 
 
 if __name__ == "__main__":
