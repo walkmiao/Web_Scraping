@@ -64,6 +64,7 @@ class SqlInit:
                                     INFO           TEXT    NOT NULL,
                                     FTP_LINK           TEXT    NOT NULL,
                                     MAGNET_LINK           TEXT    NOT NULL,
+                                    URL     TEXT NOT NULL,
                                     KIND           TEXT    NOT NULL,
                                     PUBLISH_DATE   TEXT            ,
                                     COUNTRY         TEXT           ,
@@ -73,20 +74,27 @@ class SqlInit:
             except Exception as e:
                 logger.info('[FAIL]创建表{}错误:[{}]'.format(self.table, e))
 
-    def sql_insert(self, data, count, name):
+    def sql_insert(self, data,  name):
             # sql_expression = '''INSERT INTO {table} (INFO, LINK, KIND, PUBLISH_DATE, COUNTRY)
             #                     VALUES ('{info}', '{link}', '{kind}', '{publish}', '{country}')
             #                     '''.format(table=self.table, info=info,
             #                                link=link, kind=kind, publish=publish, country=country)
-            sql_expression = '''INSERT INTO {table} (INFO, FTP_LINK, MAGNET_LINK,  KIND, PUBLISH_DATE, COUNTRY, SCORE) 
-                                           VALUES (?, ?, ?, ?, ?, ?, ?)
+            insert_sql_expression = '''INSERT INTO {table} (INFO, FTP_LINK, MAGNET_LINK, URL, KIND, PUBLISH_DATE, COUNTRY, SCORE) 
+                                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                                            '''.format(table=self.table)
+            query_sql_expression = '''SELECT * FROM {table} 
+                                            WHERE INFO = '{info}'  
+                                        '''.format(table=self.table, info=data[0])
             try:
-                self.conn.executemany(sql_expression, data)
-                self.all_count += count
-                print('[{}]插入{}行[分类:{}]成功，当前分类行[{}]'.format(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                      count, name, self.all_count))
-                self.conn.commit()
+                if len(self.conn.execute(query_sql_expression).fetchall()) < 1:
+                    self.conn.execute(insert_sql_expression, data)
+                    self.all_count += 1
+                    # print('[{}]插入{}行[分类:{}]成功，当前分类行[{}]'.format(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    #       1, name, self.all_count))
+                    print('插入分类{} info:[{}] 成功 当前行{}'.format(name, data[0], self.all_count))
+                    self.conn.commit()
+                else:
+                    print('[{}]已存在'.format(data[0]))
             except (sqlite3.OperationalError, sqlite3.IntegrityError) as e:
                 logger.info('[FAIL]插入数据库失败 SQL:{}'.format(e))
 
@@ -174,9 +182,18 @@ def crawl_index(url):
     html, res_url = get_res(url)
     sel = etree.HTML(html)
     m_dict = dict()
-    for seq, i in enumerate(sel.xpath("//div[@class='contain']/ul//li")[:-4]):
+    exract_url = prefix + sel.xpath("//div[@class='contain']/ul//li")[1].xpath(".//a/@href")[0] # 随便获取一个分类的URL这里是动作片
+    html_kind = get_res(exract_url)[0]
+    sel_kind = etree.HTML(html_kind)
+    for i in sel.xpath("//div[@class='contain']/ul//li")[:-4]:
         class_name = i.xpath(".//a/text()")[0] if i.xpath(".//a/text()") else None
         class_link = prefix + i.xpath(".//a/@href")[0] if i.xpath(".//a/@href") else None
+        if class_link and class_name:
+            m_dict[class_name] = class_link
+
+    for i in sel_kind.xpath("//div[@class='co_content2']/ul//table[@width]")[1:]:
+        class_name = i.xpath(".//a/text()")[0]
+        class_link = prefix + i.xpath(".//a/@href")[0]
         if class_link and class_name:
             m_dict[class_name] = class_link
     temp_dict = {}
@@ -209,6 +226,7 @@ def crawl_kinds(name, url, q, crawl_num=0, link_num=0):
             # logger.info("获取到分类[{}]连接 link序号:{} link:{}".format(name, link_num, link))
             q.put(link)
             # logger.debug("向Queue中放入[{}]:{}".format(movie_info, link))
+
     next_link = sel.xpath("//a[contains(text(),'下一页')]/@href")
     if next_link:
         next_link = prefix + sel.xpath("//a[contains(text(),'下一页')]/@href")[0]
@@ -216,7 +234,8 @@ def crawl_kinds(name, url, q, crawl_num=0, link_num=0):
         # logger.info("开始爬取地址:{}".format(next_link))
         crawl_kinds(name, next_link, q, crawl_num, link_num)
     else:
-        logger.info("{}分类已经爬取完毕，共{}条  最后URL:{}".format(name, crawl_num, cache_url))
+        logger.info("{}分类已经爬取完毕，共{}条 总数：{}  最后URL:{}".format(name, crawl_num,link_num,cache_url))
+        return
 
 
 # def write_err(err, path="./error.txt"):
@@ -231,28 +250,25 @@ def crawl_movie_info(name, q, sql_ins):
     :param conn: sqlite连接
     :return:
     '''
-    data_list = []
     err_count = 0
     crawled_count = 0
     insert_count = 0
+    repeat_url_count = 0
     while True:
-        url = q.get()
-        if not url:
-            logger.info('已经结束了')
+        try:
+            url = q.get(block=True, timeout=100)
+        except Exception:
+            logger.info('当前分类[{}] 总数：{} 插入总数：{}出错条数:{} 重复URL条数：{} 已爬取的URL： {} '
+                        .format(name, kind_num_dict[name], insert_count,err_count,repeat_url_count,crawled_count))
             break
-        else:
-            if url not in crawled_set:
+        if url not in crawled_set:
+                crawled_count += 1
                 crawled_set.add(url)
                 try:
                     result = get_res(url)
                     html, res_url = result
-                except Exception as e:
-                    logger.info("[REQUEST ERROR] [{}]".format(e))
-                    err_count += 1
-                    continue
-                ftp_link = list()
-                magnet_link = list()
-                try:
+                    ftp_link = list()
+                    magnet_link = list()
                     sel = etree.HTML(html)
                     for i in sel.xpath("//div[@id='Zoom']//table"):
                         link = i.xpath(".//a/@href")[0] if i.xpath(".//a/@href") else "暂缺"  # 电影只有一个连接，电视则有多条连接
@@ -271,27 +287,20 @@ def crawl_movie_info(name, q, sql_ins):
                     for c in country_list:
                         if c in movie_info:
                             country = c
-                    data_list.append((movie_info, ftp_link, magnet_link, name, publish_date, country, score))
-                    if len(data_list) > 50:
-                        mutex.acquire()
-                        sql_ins.sql_insert(data_list[:50], 50, name)
-                        mutex.release()
-                        data_list = data_list[50:]
-                        insert_count += 1
-                    else:
-                        if (kind_num_dict[name]-insert_count*50) <= 50:
-                            if len(data_list) == (kind_num_dict[name] - err_count-crawled_count-insert_count*50):
-                                sql_ins.sql_insert(data_list, len(data_list), name)
-                                logger.info('当前分类[{}] 总数：{} 插入50条次数{} 出错条数:{} 重复URL条数：{} 最后一次插入条数{}'
-                                            .format(name, kind_num_dict[name], insert_count, err_count, crawled_count, len(data_list)))
-                                break
+                    # data_list.append((movie_info, ftp_link, magnet_link, name, publish_date, country, score))
+                    data = (movie_info, ftp_link, magnet_link, url, name, publish_date, country, score)
                 except Exception as e:
-                    logger.info("获取不到此URL:{}下载地址, 错误信息：[{}]".format(url, e))
+                    logger.info("[ERROR]CAUSE BY [{}] URL:{}".format(e, url))
                     err_count += 1
                     continue
-            else:
-                crawled_count += 1
-                continue
+
+                mutex.acquire()
+                sql_ins.sql_insert(data, name)
+                mutex.release()
+                insert_count += 1
+
+        else:
+            repeat_url_count += 1
 
 
 def main():
@@ -310,17 +319,18 @@ def main():
         work_list.append(work_info)
     for work in work_list:
         work.start()
-    for work_info in work_list:
-        work_info.join()
-    for q in queue_list:
-        q.put(None)
+
+    for work in work_list:
+        work.join()
 
     sql_ins.conn.close()
-    logger.info("[END] ALL DATA items INSERT SUCCESS!")
+    logger.info("[END] ALL DATA items INSERT SUCCESS! ITEMS:{}".format(sql_ins.all_count))
 
 
 if __name__ == "__main__":
     main()
+    # url="https://www.dy2018.com/"
+    # crawl_index(url)
     # url = "http://www.ygdy8.net/html/tv/hytv/20170404/53606.html"
     # crawl_movie_info(url)
     # q = Queue()
