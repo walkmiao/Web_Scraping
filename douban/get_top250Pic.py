@@ -7,11 +7,9 @@
 # @Software: PyCharm
 
 from lxml import etree
-import pandas as pd
 import requests
-import time
 import os
-from get_top250movies import download
+from douban.get_top250movies import download
 
 base_url='https://movie.douban.com/top250'
 
