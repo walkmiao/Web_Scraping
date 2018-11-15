@@ -18,7 +18,7 @@ import time
 from threading import Thread
 
 city_map_url = "https://kyfw.12306.cn/otn/resources/js/framework/station_name.js?station_version=1.9059"
-base_url = "https://kyfw.12306.cn/otn/leftTicket/query?"
+base_url = "https://kyfw.12306.cn/otn/leftTicket/queryA?"
 headers = {
         'User-Agent': "Mozilla/5.0 (Windows NT 6.1; Win64; x64) "
                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/67.0.3396.99 Safari/537.36",
